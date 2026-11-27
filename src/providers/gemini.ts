@@ -17,17 +17,23 @@ export async function runGemini(input: RunInput, native: boolean): Promise<RunRe
   if (native) body.tools = [{ google_search: {} }];
   if (p.effort) body.generationConfig = { thinkingConfig: { thinkingLevel: p.effort === "low" ? "low" : "high" } };
 
-  const res = await safeFetch(
-    `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": p.apiKey },
-      body: JSON.stringify(body),
-      signal,
-    },
-    "Google Gemini",
-  );
-  if (!res.ok) throw await httpError(res, "Google Gemini");
+  let res: Response;
+  for (;;) {
+    res = await safeFetch(
+      `${base}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": p.apiKey },
+        body: JSON.stringify(body),
+        signal,
+      },
+      "Google Gemini",
+    );
+    if (res.ok) break;
+    // Model lain bisa menolak thinkingConfig: ulangi tanpa itu.
+    if (res.status === 400 && body.generationConfig) { delete body.generationConfig; continue; }
+    throw await httpError(res, "Google Gemini");
+  }
 
   let text = "";
   let grounding: any;

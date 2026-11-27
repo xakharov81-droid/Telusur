@@ -87,7 +87,7 @@ async function seed(page, profile, extra = {}) {
     if (sessionStorage.getItem("seeded")) return;
     sessionStorage.setItem("seeded", "1");
     localStorage.clear();
-    const prof = Object.assign({ id: "p1", name: "Uji", provider: "anthropic", apiKey: "test-key", model: "claude-opus-5-5", baseUrl: "", search: "native", searchKey: "", searchUrl: "", effort: "medium", maxSearches: 5 }, p);
+    const prof = Object.assign({ id: "p1", name: "Uji", provider: "anthropic", apiKey: "test-key", model: "claude-opus-5-5", baseUrl: "", search: "native", searchKey: "", searchUrl: "", effort: "medium", maxSearches: 5, autoLatest: false, allowPreview: false }, p);
     localStorage.setItem("telusur.settings.v1", JSON.stringify(Object.assign({ version: 1, profiles: [prof], activeId: prof.id, theme: "auto", systemExtra: "", saveHistory: true }, e)));
     localStorage.setItem("telusur.welcomed", "1");
   }, [profile, extra]);
@@ -307,6 +307,52 @@ const check = (name, cond, detail = "") => {
     await page.goto(BASE + "?q=" + encodeURIComponent("harga emas"));
     await page.locator(".ex .actions:not([hidden])").waitFor({ timeout: 15000 });
     check("URL ?q= langsung menjalankan pencarian", (await page.locator(".ex h2").innerText()) === "harga emas");
+    await ctx.close();
+  }
+
+  // 10. Selalu versi terbaru: deteksi model baru + mundur otomatis bila belum tersedia
+  {
+    const ctx = await browser.newContext({ viewport: { width: 1200, height: 860 }, deviceScaleFactor: 2 });
+    const page = await ctx.newPage();
+    await seed(page, { name: "Claude Terbaru", provider: "anthropic", model: "claude-opus-5-5", autoLatest: true });
+    const tried = [];
+    const bodies = [];
+    await page.route("https://api.anthropic.com/**", async (route) => {
+      const req = route.request();
+      if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: cors });
+      if (req.url().includes("/v1/models")) {
+        return route.fulfill({ status: 200, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-7", display_name: "Claude Opus 7", created_at: "2027-03-01T00:00:00Z" },
+            { type: "model", id: "claude-opus-6", display_name: "Claude Opus 6", created_at: "2027-01-10T00:00:00Z" },
+            { type: "model", id: "claude-sonnet-6", display_name: "Claude Sonnet 6", created_at: "2027-01-05T00:00:00Z" },
+            { type: "model", id: "claude-opus-5-5", display_name: "Claude Opus 5.5", created_at: "2026-10-01T00:00:00Z" },
+          ], has_more: false, first_id: "claude-opus-7", last_id: "claude-opus-5-5" }) });
+      }
+      const body = JSON.parse(req.postData());
+      tried.push(body.model);
+      bodies.push(body);
+      if (body.model === "claude-opus-7") {
+        return route.fulfill({ status: 404, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify({ type: "error", error: { type: "not_found_error", message: "model: claude-opus-7" } }) });
+      }
+      if (body.model === "claude-opus-6" && body.fallbacks) {
+        return route.fulfill({ status: 400, headers: { ...cors, "content-type": "application/json" }, body: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "fallbacks: not supported for this model" } }) });
+      }
+      await route.fulfill({ status: 200, headers: { ...cors, "content-type": "text/event-stream" }, body: anthropicStream().replaceAll("claude-opus-5-5", body.model) });
+    });
+    await page.goto(BASE);
+    await ask(page, "Berapa harga emas hari ini?");
+    check("Terbaru: model terbaru dicoba lebih dulu", tried[0] === "claude-opus-7", tried.join(" > "));
+    check("Terbaru: mundur ke versi berikutnya saat belum tersedia (404)", tried.includes("claude-opus-6") && !tried.includes("claude-sonnet-6"), tried.join(" > "));
+    check("Terbaru: model masa depan menolak parameter → diulang tanpa parameter itu", bodies.some((b) => b.model === "claude-opus-6" && !b.fallbacks), tried.join(" > "));
+    check("Terbaru: jawaban dilayani claude-opus-6", /claude-opus-6/.test(await page.locator(".actions .by").innerText()));
+    const s = JSON.parse(await page.evaluate(() => localStorage.getItem("telusur.settings.v1")));
+    check("Terbaru: model yang gagal tidak dicoba lagi (cache)", s.profiles[0].resolvedCandidates?.[0] === "claude-opus-6", JSON.stringify(s.profiles[0].resolvedCandidates));
+    check("Terbaru: menu atas menampilkan model terbaru", /claude-opus-6/.test(await page.locator("#pp").innerText()));
+    await page.locator("#setBtn").click();
+    check("Terbaru: pengaturan menampilkan versi terdeteksi", /claude-opus-6/.test(await page.locator("[data-latest]").innerText()));
+    await page.locator("[data-latest]").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${OUT}/10-selalu-terbaru.png` });
     await ctx.close();
   }
 

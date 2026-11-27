@@ -20,6 +20,13 @@ export interface Profile {
   /** Tingkat effort/reasoning: "" = bawaan model. */
   effort: "" | "low" | "medium" | "high" | "xhigh" | "max";
   maxSearches: number;
+  /** Selalu pakai versi terbaru dari lini model yang dipilih. */
+  autoLatest: boolean;
+  /** Ikutkan model preview/eksperimental saat mencari versi terbaru. */
+  allowPreview: boolean;
+  /** Cache hasil pengecekan versi terbaru (terbaru di depan). */
+  resolvedCandidates?: string[];
+  resolvedAt?: number;
 }
 
 export interface Source {
@@ -50,6 +57,8 @@ export interface RunInput {
   question: string;
   signal: AbortSignal;
   cb: RunCallbacks;
+  /** Dipanggil bila data profil (cache model terbaru) berubah dan perlu disimpan. */
+  onProfileChange?: () => void;
 }
 
 export interface RunResult {
@@ -59,4 +68,8 @@ export interface RunResult {
   note?: string;
 }
 
-export class FriendlyError extends Error {}
+export class FriendlyError extends Error {
+  constructor(message: string, public status?: number) {
+    super(message);
+  }
+}

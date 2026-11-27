@@ -2,15 +2,51 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { BetaMessageParam, BetaToolUnion } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { FriendlyError, type RunInput, type RunResult } from "./types";
 import { explainStatus } from "./sse";
+import { parseModel } from "./latest";
 
-// Model yang menerima server-side fallback `fallbacks: "default"` saat ditolak classifier.
+// Model yang diketahui menerima server-side fallback `fallbacks: "default"` saat ditolak classifier.
 const FALLBACK_MODELS = /^claude-(opus-5-5|opus-5|fable-5(-1|-2)?|mythos-5(-1|-2)?|sonnet-5-5)$/;
-// Model yang mendukung web_search_20260209 (dynamic filtering); model lain memakai varian dasar.
-const DYNAMIC_SEARCH = /^claude-(fable|mythos|opus-5|opus-4-[678]|sonnet-5|sonnet-4-6)/;
+// Model lama yang hanya mendukung varian dasar web search (bukan web_search_20260209).
+const BASIC_SEARCH = /^claude-(3|haiku|sonnet-4-5|sonnet-4-0|sonnet-4$|opus-4-[015]|opus-4$)/;
 // Model lama yang tidak menerima output_config.effort.
-const NO_EFFORT = /^claude-(haiku-4|sonnet-4-5|3)/;
+const NO_EFFORT = /^claude-(haiku-4|sonnet-4-5|sonnet-4-0|3)/;
+
+/** Model yang lebih baru dari yang dikenal aplikasi ini (mis. Opus 6): coba fitur terbaru dulu. */
+function isFuture(model: string): boolean {
+  const { family, version } = parseModel(model);
+  const major = version[0] ?? 0;
+  const minor = version[1] ?? 0;
+  return /^claude-(opus|sonnet|fable|mythos)$/.test(family) && (major > 5 || (major === 5 && minor > 5));
+}
 
 export async function runAnthropic(input: RunInput, native: boolean): Promise<RunResult> {
+  const { profile: p } = input;
+  // Fitur yang dicoba; bila model menolak (400) sebelum ada jawaban, matikan satu per satu lalu ulangi.
+  const feat = {
+    fallback: FALLBACK_MODELS.test(p.model) || isFuture(p.model),
+    dynamicSearch: !BASIC_SEARCH.test(p.model),
+    effort: !!p.effort && !NO_EFFORT.test(p.model),
+  };
+  for (;;) {
+    try {
+      return await attempt(input, native, feat);
+    } catch (e) {
+      const st = e instanceof Anthropic.APIError ? e.status : undefined;
+      if (st === 400 && !(e as any).__emitted) {
+        if (feat.fallback) { feat.fallback = false; continue; }
+        if (native && feat.dynamicSearch) { feat.dynamicSearch = false; continue; }
+        if (feat.effort) { feat.effort = false; continue; }
+      }
+      throw mapError(e);
+    }
+  }
+}
+
+async function attempt(
+  input: RunInput,
+  native: boolean,
+  feat: { fallback: boolean; dynamicSearch: boolean; effort: boolean },
+): Promise<RunResult> {
   const { profile: p, cb, signal } = input;
   const client = new Anthropic({
     apiKey: p.apiKey,
@@ -27,14 +63,14 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
 
   const tools: BetaToolUnion[] | undefined = native
     ? [
-        DYNAMIC_SEARCH.test(p.model)
+        feat.dynamicSearch
           ? { type: "web_search_20260209", name: "web_search", max_uses: p.maxSearches || 5 }
           : { type: "web_search_20250305", name: "web_search", max_uses: p.maxSearches || 5 },
       ]
     : undefined;
 
-  const useFallback = FALLBACK_MODELS.test(p.model);
   let servedBy: string | undefined;
+  let emitted = false;
 
   // Loop untuk pause_turn: server-side tool loop bisa berhenti sementara; kirim ulang untuk melanjutkan.
   for (let round = 0; round < 4; round++) {
@@ -45,8 +81,8 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
         system: input.system,
         messages,
         ...(tools ? { tools } : {}),
-        ...(p.effort && !NO_EFFORT.test(p.model) ? { output_config: { effort: p.effort } } : {}),
-        ...(useFallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
+        ...(feat.effort ? { output_config: { effort: p.effort as "low" | "medium" | "high" | "xhigh" | "max" } } : {}),
+        ...(feat.fallback ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
       },
       { signal },
     );
@@ -55,6 +91,7 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
     const blockCites = new Map<number, Set<number>>();
     const toolInputs = new Map<number, string>();
 
+    let msg;
     try {
       for await (const ev of stream) {
         if (ev.type === "content_block_start") {
@@ -76,8 +113,10 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
           }
         } else if (ev.type === "content_block_delta") {
           const d = ev.delta;
-          if (d.type === "text_delta") cb.onText(d.text);
-          else if (d.type === "citations_delta" && d.citation.type === "web_search_result_location") {
+          if (d.type === "text_delta") {
+            if (d.text) emitted = true;
+            cb.onText(d.text);
+          } else if (d.type === "citations_delta" && d.citation.type === "web_search_result_location") {
             const n = cb.addSource({ url: d.citation.url, title: d.citation.title || d.citation.url });
             if (!blockCites.has(ev.index)) blockCites.set(ev.index, new Set());
             blockCites.get(ev.index)!.add(n);
@@ -98,15 +137,10 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
           }
         }
       }
-    } catch (e) {
-      throw mapError(e);
-    }
-
-    let msg;
-    try {
       msg = await stream.finalMessage();
     } catch (e) {
-      throw mapError(e);
+      if (e && typeof e === "object") (e as any).__emitted = emitted;
+      throw e;
     }
     servedBy = msg.model;
 
@@ -131,6 +165,7 @@ export async function runAnthropic(input: RunInput, native: boolean): Promise<Ru
 }
 
 function mapError(e: unknown): Error {
+  if (e instanceof FriendlyError) return e;
   if (e instanceof Anthropic.APIUserAbortError) {
     const err = new Error("aborted");
     err.name = "AbortError";
@@ -140,7 +175,7 @@ function mapError(e: unknown): Error {
     return new FriendlyError("Tidak bisa terhubung ke Anthropic. Periksa koneksi internet atau Base URL.");
   }
   if (e instanceof Anthropic.APIError && typeof e.status === "number") {
-    return new FriendlyError(`${explainStatus(e.status, "Anthropic")}\n\nDetail: ${e.message}`);
+    return new FriendlyError(`${explainStatus(e.status, "Anthropic")}\n\nDetail: ${e.message}`, e.status);
   }
   return e instanceof Error ? e : new Error(String(e));
 }

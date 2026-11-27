@@ -33,8 +33,13 @@ export async function runChat(input: RunInput, o: ChatOpts): Promise<RunResult> 
   const headers: Record<string, string> = { "content-type": "application/json", ...o.extraHeaders };
   if (p.apiKey) headers.authorization = `Bearer ${p.apiKey}`;
 
-  const res = await safeFetch(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify(body), signal }, o.name);
-  if (!res.ok) throw await httpError(res, o.name);
+  let res: Response;
+  for (;;) {
+    res = await safeFetch(`${base}/chat/completions`, { method: "POST", headers, body: JSON.stringify(body), signal }, o.name);
+    if (res.ok) break;
+    if (res.status === 400 && body.reasoning) { delete body.reasoning; continue; }
+    throw await httpError(res, o.name);
+  }
   if (o.native) cb.onStatus("Mencari di web…");
 
   let text = "";

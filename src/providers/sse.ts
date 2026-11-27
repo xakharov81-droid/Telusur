@@ -50,7 +50,7 @@ export async function httpError(res: Response, provider: string): Promise<Friend
   } catch {
     /* abaikan */
   }
-  return new FriendlyError(explainStatus(res.status, provider) + (detail ? `\n\nDetail: ${detail.slice(0, 500)}` : ""));
+  return new FriendlyError(explainStatus(res.status, provider) + (detail ? `\n\nDetail: ${detail.slice(0, 500)}` : ""), res.status);
 }
 
 export function explainStatus(status: number, provider: string): string {

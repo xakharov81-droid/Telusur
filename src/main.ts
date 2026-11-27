@@ -1,5 +1,6 @@
 import "./style.css";
 import { PROVIDERS, listModels, runSearch } from "./providers";
+import { parseModel, resolveModels } from "./providers/latest";
 import { FriendlyError, type Profile, type ProviderKind, type SearchBackendKind, type Source, type Turn } from "./providers/types";
 import {
   exportBundle, importBundle, loadHistory, loadSettings, newProfile, saveHistory, saveSettings, uid,
@@ -86,9 +87,11 @@ const dock = $("#dock");
 function renderProfilePick() {
   const pp = $<HTMLSelectElement>("#pp");
   pp.innerHTML = settings.profiles
-    .map((p) => `<option value="${p.id}" ${p.id === settings.activeId ? "selected" : ""}>${esc(p.name)} · ${esc(shortModel(p.model))}</option>`)
+    .map((p) => `<option value="${p.id}" ${p.id === settings.activeId ? "selected" : ""}>${esc(p.name)} · ${esc(shortModel(currentModel(p)))}${p.autoLatest ? " ↑" : ""}</option>`)
     .join("");
 }
+/** Model yang sedang dipakai: hasil cek "terbaru" bila aktif, selain itu pilihan manual. */
+const currentModel = (p: Profile) => (p.autoLatest && p.resolvedCandidates?.[0]) || p.model;
 const shortModel = (m: string) => (m.length > 24 ? m.slice(0, 22) + "…" : m);
 
 $("#pp").addEventListener("change", (e) => {
@@ -363,6 +366,10 @@ async function ask(q: string, followUp: boolean, redoIndex?: number) {
       history: turns,
       question: q,
       signal: controller.signal,
+      onProfileChange: () => {
+        persist();
+        renderProfilePick();
+      },
       cb: {
         onText(d) {
           ex.a += d;
@@ -559,6 +566,16 @@ function profileTab(body: HTMLElement) {
       <datalist id="models-dl">${meta.models.map((m) => `<option value="${esc(m)}"></option>`).join("")}</datalist>
       <small data-modelhint>Ketik nama model, atau tekan “Muat daftar” untuk mengambil model yang tersedia untuk key Anda.</small></label>
 
+    <div class="callout" style="margin-top:-2px">
+      <label class="check" style="margin-bottom:6px"><input type="checkbox" data-b="autoLatest" ${p.autoLatest ? "checked" : ""} /> <b>Selalu pakai versi terbaru otomatis</b></label>
+      <div class="hint" style="color:inherit">${p.autoLatest
+        ? `Lini model: <b>${esc(parseModel(p.model).family || p.model)}</b>. Saat versi baru di lini ini dirilis (termasuk yang berbayar), Telusur langsung memakainya. Dicek otomatis tiap 6 jam; bila versi terbaru belum tersedia untuk key Anda, otomatis mundur ke versi sebelumnya.`
+        : "Mati: Telusur selalu memakai model yang Anda ketik di atas."}</div>
+      ${p.autoLatest ? `<div class="hint" style="color:inherit;margin-top:8px" data-latest>${latestLine(p)}</div>
+      <label class="check" style="margin:8px 0 0"><input type="checkbox" data-b="allowPreview" ${p.allowPreview ? "checked" : ""} /> Ikutkan versi preview/eksperimen (lebih baru, kadang belum stabil)</label>
+      <div class="btns"><button class="btn" type="button" data-check>Cek versi terbaru sekarang</button></div>` : ""}
+    </div>
+
     <div class="grid2">
       <label class="field"><span>Sumber pencarian</span>
         <select data-k="search">${searchOpts.map((k) => `<option value="${k}" ${k === p.search ? "selected" : ""}>${SEARCH_LABELS[k]}</option>`).join("")}</select></label>
@@ -600,13 +617,43 @@ function profileTab(body: HTMLElement) {
         if (!p.model || prev.models.includes(p.model)) p.model = nm.models[0];
         if (p.name === prev.label.split(" ")[0] || p.name === "Claude" || !p.name) p.name = nm.label.split(" ")[0].replace(/[()]/g, "");
         p.search = nm.native ? "native" : "wikipedia";
+        p.resolvedCandidates = undefined;
+        p.resolvedAt = 0;
+        p.autoLatest = p.provider !== "compat";
         p.effort = p.provider === "anthropic" ? "medium" : "";
         save();
         return profileTab(body);
       } else (p as any)[k] = v;
+      if (k === "model" || k === "apiKey" || k === "baseUrl") {
+        p.resolvedCandidates = undefined;
+        p.resolvedAt = 0;
+      }
       save();
       if (k === "search") profileTab(body);
     });
+  });
+  body.querySelector('[data-k="model"]')?.addEventListener("change", () => profileTab(body));
+  body.querySelectorAll<HTMLInputElement>("[data-b]").forEach((inp) =>
+    inp.addEventListener("change", () => {
+      const k = inp.dataset.b as "autoLatest" | "allowPreview";
+      p[k] = inp.checked;
+      p.resolvedCandidates = undefined;
+      p.resolvedAt = 0;
+      save();
+      profileTab(body);
+    }),
+  );
+  body.querySelector("[data-check]")?.addEventListener("click", async () => {
+    const el = $("[data-latest]", body);
+    if (PROVIDERS[p.provider].keyRequired && !p.apiKey) {
+      el.textContent = "Isi API key dulu.";
+      return;
+    }
+    el.textContent = "Memeriksa…";
+    const before = p.resolvedAt;
+    await resolveModels(p, true);
+    save();
+    el.innerHTML = p.resolvedAt !== before ? latestLine(p) : "Gagal mengecek (periksa API key / koneksi). Telusur tetap memakai hasil terakhir.";
   });
   body.querySelector("[data-show]")?.addEventListener("click", (e) => {
     const inp = $<HTMLInputElement>('[data-k="apiKey"]', body);
@@ -658,6 +705,14 @@ function profileTab(body: HTMLElement) {
     save();
     profileTab(body);
   });
+}
+
+function latestLine(p: Profile): string {
+  const top = p.resolvedCandidates?.[0];
+  if (!top || !p.resolvedAt) return "Belum dicek — akan dicek otomatis saat pencarian pertama.";
+  const mins = Math.round((Date.now() - p.resolvedAt) / 60000);
+  const ago = mins < 1 ? "baru saja" : mins < 60 ? `${mins} menit lalu` : `${Math.round(mins / 60)} jam lalu`;
+  return `Versi terbaru terdeteksi: <b>${esc(top)}</b> <span style="opacity:.75">(dicek ${ago})</span>`;
 }
 
 function generalTab(body: HTMLElement) {

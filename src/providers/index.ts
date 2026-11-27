@@ -3,6 +3,8 @@ import { runOpenAI } from "./openai";
 import { runGemini } from "./gemini";
 import { runChat } from "./chat";
 import { searchWeb, withContext } from "../search/backends";
+import { fetchModels, resolveModels } from "./latest";
+import { FriendlyError } from "./types";
 
 export const PROVIDERS: Record<
   ProviderKind,
@@ -64,8 +66,37 @@ export async function runSearch(input: RunInput): Promise<RunResult> {
     input.cb.onStatus(numbered.length ? `Menemukan ${numbered.length} sumber; menyusun jawaban…` : "Tidak ada hasil; menjawab dari pengetahuan model…");
     question = withContext(input.question, numbered);
   }
-  const run = { ...input, question };
+  // "Selalu terbaru": coba model terbaru dulu; bila ditolak (belum tersedia untuk key ini), mundur ke versi sebelumnya.
+  let candidates = [p.model];
+  if (p.autoLatest) {
+    input.cb.onStatus("Memeriksa versi model terbaru…");
+    candidates = await resolveModels(p);
+    input.onProfileChange?.();
+  }
+  let emitted = false;
+  const cb = { ...input.cb, onText: (d: string) => { if (d) emitted = true; input.cb.onText(d); } };
+  for (let i = 0; i < candidates.length; i++) {
+    const model = candidates[i];
+    try {
+      const res = await runOnce({ ...input, cb, question, profile: { ...p, model } }, native);
+      return { ...res, servedBy: res.servedBy || model };
+    } catch (e) {
+      const st = e instanceof FriendlyError ? e.status : undefined;
+      const retryable = st === 400 || st === 403 || st === 404;
+      if (!retryable || emitted || i === candidates.length - 1) throw e;
+      input.cb.onStatus(`${model} belum bisa dipakai, mencoba ${candidates[i + 1]}…`);
+      if (p.resolvedCandidates?.[0] === model) {
+        // Jangan coba model yang gagal itu lagi sampai pengecekan berikutnya.
+        p.resolvedCandidates = p.resolvedCandidates.filter((m) => m !== model);
+        input.onProfileChange?.();
+      }
+    }
+  }
+  throw new FriendlyError("Tidak ada model yang bisa dipakai.");
+}
 
+async function runOnce(run: RunInput & { question: string }, native: boolean): Promise<RunResult> {
+  const p = run.profile;
   switch (p.provider) {
     case "anthropic": {
       // SDK Anthropic dimuat saat dibutuhkan agar aplikasi terbuka lebih cepat.
@@ -88,41 +119,8 @@ export async function runSearch(input: RunInput): Promise<RunResult> {
   }
 }
 
-/** Ambil daftar model dari penyedia (untuk dropdown). */
+/** Ambil daftar model dari penyedia (untuk dropdown), terbaru di atas bila waktu rilis tersedia. */
 export async function listModels(p: { provider: ProviderKind; apiKey: string; baseUrl: string }): Promise<string[]> {
-  const b = (u: string) => (p.baseUrl || u).replace(/\/+$/, "");
-  let res: Response;
-  switch (p.provider) {
-    case "anthropic": {
-      const { default: Anthropic } = await import("@anthropic-ai/sdk");
-      const client = new Anthropic({ apiKey: p.apiKey, baseURL: p.baseUrl || undefined, dangerouslyAllowBrowser: true });
-      const ids: string[] = [];
-      for await (const m of client.models.list({ limit: 100 })) ids.push(m.id);
-      return ids;
-    }
-    case "openai":
-      res = await fetch(`${b("https://api.openai.com/v1")}/models`, { headers: { authorization: `Bearer ${p.apiKey}` } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return ((await res.json()).data || []).map((m: any) => m.id).sort();
-    case "gemini":
-      res = await fetch(`${b("https://generativelanguage.googleapis.com/v1beta")}/models?pageSize=200`, {
-        headers: { "x-goog-api-key": p.apiKey },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return ((await res.json()).models || [])
-        .filter((m: any) => (m.supportedGenerationMethods || []).includes("generateContent"))
-        .map((m: any) => String(m.name).replace(/^models\//, ""));
-    case "openrouter":
-      res = await fetch(`${b("https://openrouter.ai/api/v1")}/models`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return ((await res.json()).data || []).map((m: any) => m.id).sort();
-    case "compat": {
-      if (!p.baseUrl) throw new Error("Isi Base URL dulu");
-      const headers: Record<string, string> = {};
-      if (p.apiKey) headers.authorization = `Bearer ${p.apiKey}`;
-      res = await fetch(`${b("")}/models`, { headers });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return ((await res.json()).data || []).map((m: any) => m.id).sort();
-    }
-  }
+  const ms = await fetchModels(p);
+  return ms.sort((a, b) => (b.created ?? 0) - (a.created ?? 0) || a.id.localeCompare(b.id)).map((m) => m.id);
 }

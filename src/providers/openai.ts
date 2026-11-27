@@ -21,17 +21,24 @@ export async function runOpenAI(input: RunInput, native: boolean): Promise<RunRe
   }
   if (p.effort) body.reasoning = { effort: p.effort === "max" || p.effort === "xhigh" ? "high" : p.effort };
 
-  const res = await safeFetch(
-    `${base}/responses`,
-    {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${p.apiKey}` },
-      body: JSON.stringify(body),
-      signal,
-    },
-    "OpenAI",
-  );
-  if (!res.ok) throw await httpError(res, "OpenAI");
+  // Model baru/berbeda bisa menolak parameter tertentu (400): ulangi tanpa parameter opsional itu.
+  let res: Response;
+  for (;;) {
+    res = await safeFetch(
+      `${base}/responses`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${p.apiKey}` },
+        body: JSON.stringify(body),
+        signal,
+      },
+      "OpenAI",
+    );
+    if (res.ok) break;
+    if (res.status === 400 && body.reasoning) { delete body.reasoning; continue; }
+    if (res.status === 400 && body.include) { delete body.include; continue; }
+    throw await httpError(res, "OpenAI");
+  }
 
   let servedBy: string | undefined;
   let failure: string | undefined;

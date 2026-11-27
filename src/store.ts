@@ -35,6 +35,7 @@ const MAX_THREADS = 300;
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
 export function newProfile(partial: Partial<Profile> = {}): Profile {
+  const given = Object.fromEntries(Object.entries(partial).filter(([, v]) => v !== undefined)) as Partial<Profile>;
   return {
     id: uid(),
     name: "Claude",
@@ -47,7 +48,9 @@ export function newProfile(partial: Partial<Profile> = {}): Profile {
     searchUrl: "",
     effort: "medium",
     maxSearches: 5,
-    ...partial,
+    autoLatest: true,
+    allowPreview: false,
+    ...given,
   };
 }
 

@@ -14,6 +14,13 @@ Cara kerjanya: Anda mengetik pertanyaan, lalu AI pilihan Anda mencari di web dan
 | **OpenRouter** | Tool `openrouter:web_search` | Satu key untuk ratusan model. |
 | **OpenAI-compatible / lokal** | Wikipedia, Tavily, Brave, SearXNG, atau tanpa pencarian | Ollama, LM Studio, Groq, DeepSeek, Mistral, Perplexity, dan lainnya. |
 
+### Selalu versi terbaru
+Setiap profil punya opsi **"Selalu pakai versi terbaru otomatis"** (aktif secara default). Telusur membaca *lini* model yang Anda pilih, misalnya `claude-opus-5-5` → lini `claude-opus`. Setiap 6 jam (atau saat tombol "Cek versi terbaru sekarang" ditekan), Telusur mengambil daftar model resmi dari penyedia dan memakai versi tertinggi di lini itu, termasuk model berbayar. Contohnya, `claude-opus-6` langsung dipakai begitu dirilis.
+- Varian berbeda (mini, lite, fast, Sonnet vs Opus) tidak tertukar.
+- Bila versi terbaru belum bisa dipakai oleh key Anda (404/403/400), Telusur otomatis mundur ke versi sebelumnya.
+- Bila model baru menolak parameter lama, permintaan otomatis disederhanakan lalu diulang.
+- Versi preview/eksperimen bisa diikutkan lewat kotak centang di pengaturan.
+
 Anda bisa membuat **banyak profil** (misalnya "Claude teliti", "Gemini gratis", "Ollama offline"), lalu berganti profil dari menu di bagian atas.
 
 ## Fitur
@@ -46,7 +53,7 @@ npm run build      # menghasilkan folder dist/
 ```
 Unggah isi folder `dist/` ke salah satu layanan berikut (semuanya HTTPS, yang wajib untuk PWA):
 - **Netlify Drop**: seret folder `dist` ke <https://app.netlify.com/drop>. Paling mudah, tanpa akun Git.
-- **GitHub Pages**: push ke repositori, lalu Settings → Pages → deploy dari folder `dist` (atau pakai GitHub Actions).
+- **GitHub Pages (otomatis)**: repositori ini sudah berisi `.github/workflows/deploy.yml`. Push ke branch `main`, lalu buka Settings → Pages → *Source: GitHub Actions*. Situs akan terbit di `https://<user>.github.io/<repo>/` dan diperbarui otomatis setiap ada push.
 - **Cloudflare Pages** / **Vercel**: hubungkan repositori, isi *build command* `npm run build` dan *output* `dist`.
 
 ### 3. Pasang di perangkat
@@ -90,5 +97,6 @@ tests/e2e.cjs           uji end-to-end dengan respons penyedia tiruan
 ```bash
 npm run build && npx vite preview --port 4173 &
 node tests/e2e.cjs
+node tests/latest.test.mjs   # logika "versi terbaru"
 ```
 Uji ini memakai respons tiruan untuk setiap penyedia, sehingga tidak butuh API key.
